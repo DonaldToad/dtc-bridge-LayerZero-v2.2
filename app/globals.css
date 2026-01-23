@@ -12,15 +12,49 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* Theme toggle (next-themes sets `.dark` on <html>) */
+html.dark {
+  --background: #070b12;
+  --foreground: #000000;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Force all form inputs to use black text in dark mode */
+html.dark input,
+html.dark textarea,
+html.dark select {
+  color: #000000;
+}
+
+/* Optional: smoother dark-mode background */
+html.dark body {
+  background: radial-gradient(
+      1200px 800px at 20% 0%,
+      rgba(34, 211, 238, 0.10),
+      transparent 60%
+    ),
+    radial-gradient(
+      900px 600px at 80% 10%,
+      rgba(99, 102, 241, 0.10),
+      transparent 55%
+    ),
+    var(--background);
+}
+
+/* =========================================================
+   FORCE ONLY HEADER BRAND TEXT TO WHITE IN DARK MODE
+   (ignores ALL other overrides, nothing else affected)
+   ========================================================= */
+
+html.dark .dtc-brand-title {
+  color: #ffffff !important;
+}
+
+html.dark .dtc-brand-subtitle {
+  color: rgba(255, 255, 255, 0.8) !important;
 }
