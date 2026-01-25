@@ -4,6 +4,7 @@ import Image from "next/image";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAccount, useChainId, useConfig, useSwitchChain } from "wagmi";
 import { linea, base } from "wagmi/chains";
+
 import Header from "@/components/Header";
 
 import {
@@ -11,8 +12,15 @@ import {
   writeContract,
   waitForTransactionReceipt,
   getBalance,
+  simulateContract,
 } from "@wagmi/core";
-import { formatEther, isAddress, parseUnits } from "viem";
+
+import {
+  formatEther,
+  isAddress,
+  parseUnits,
+  maxUint256,
+} from "viem";
 
 import { BRIDGE_CONFIG } from "@/lib/bridgeConfig";
 import { ERC20_ABI, OFT_ABI, ROUTER_ABI } from "@/lib/abi";
@@ -21,7 +29,6 @@ import { buildLzReceiveOptions } from "@/lib/lzOptions";
 import { loadHistory, saveHistory, type BridgeHistoryItem } from "@/lib/storage";
 
 export default function Home() {
-  // NOTE: Do not early-return before hooks that may be added later
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
@@ -34,7 +41,12 @@ export default function Home() {
   const onBase = chainId === base.id;
   const unsupported = !onLinea && !onBase;
 
-  // Direction derived from network
+  // Router V2 override (Base)
+  const baseRouter = useMemo(() => {
+    return (process.env.NEXT_PUBLIC_ROUTER_V2_BASE ??
+      BRIDGE_CONFIG.contracts.baseRouter) as `0x${string}`;
+  }, []);
+
   const direction = useMemo(() => {
     if (onLinea) return "LINEA_TO_BASE";
     if (onBase) return "BASE_TO_LINEA";
@@ -55,7 +67,6 @@ export default function Home() {
       ? "You are on Base. This bridge will send DTC back to Linea."
       : "Switch to Linea or Base to continue.";
 
-  // ---------- State machine ----------
   type BridgeState =
     | "CONNECT_WALLET"
     | "WRONG_NETWORK"
@@ -64,13 +75,14 @@ export default function Home() {
     | "QUOTING_FEE"
     | "NEED_APPROVAL"
     | "APPROVING"
-    | "DEPOSITING"
     | "SENDING"
     | "CONFIRMED"
     | "ERROR";
 
   const [bridgeState, setBridgeState] = useState<BridgeState>("CONNECT_WALLET");
-  const [statusMessage, setStatusMessage] = useState<string>("Waiting for wallet connection.");
+  const [statusMessage, setStatusMessage] = useState<string>(
+    "Waiting for wallet connection."
+  );
 
   const [amount, setAmount] = useState<string>("");
   const [recipient, setRecipient] = useState<string>("");
@@ -92,7 +104,6 @@ export default function Home() {
     setLogs((prev) => [...prev, { t: Date.now(), m }].slice(-200));
   };
 
-  // Load history once on mount
   useEffect(() => {
     if (!mounted) return;
     setHistory(loadHistory());
@@ -101,7 +112,6 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mounted]);
 
-  // Effective recipient: valid input or fallback to connected address
   const effectiveRecipient = useMemo(() => {
     const r = recipient.trim();
     if (r && isAddress(r)) return r as `0x${string}`;
@@ -109,7 +119,6 @@ export default function Home() {
     return undefined;
   }, [recipient, address]);
 
-  // Parse amount to token decimals
   const parsedAmountLD = useMemo(() => {
     const a = amount.trim();
     if (!a) return undefined;
@@ -121,13 +130,11 @@ export default function Home() {
     }
   }, [amount, tokenDecimals]);
 
-  // Amount safety: do not allow sending over user balance.
   const amountExceedsBalance = useMemo(() => {
     if (!parsedAmountLD) return false;
     return parsedAmountLD > userBal;
   }, [parsedAmountLD, userBal]);
 
-  // Base cap safety too (router caps apply to bridgeToLinea)
   const amountExceedsBaseCap = useMemo(() => {
     if (!onBase) return false;
     if (!parsedAmountLD) return false;
@@ -135,14 +142,12 @@ export default function Home() {
     return parsedAmountLD > baseCapPerTx;
   }, [onBase, parsedAmountLD, baseCapPerTx]);
 
-  // Unified max allowed for Max button
   const maxAllowed = useMemo(() => {
     let max = userBal;
     if (onBase && baseCapPerTx != null && baseCapPerTx < max) max = baseCapPerTx;
     return max;
   }, [userBal, onBase, baseCapPerTx]);
 
-  // Fetch decimals + balance when connected / chain changes
   useEffect(() => {
     if (!mounted) return;
 
@@ -185,14 +190,14 @@ export default function Home() {
           try {
             const cap = (await readContract(wagmiConfig, {
               chainId: base.id,
-              address: BRIDGE_CONFIG.contracts.baseRouter,
+              address: baseRouter,
               abi: ROUTER_ABI,
               functionName: "capPerTx",
             })) as bigint;
 
             const gas = (await readContract(wagmiConfig, {
               chainId: base.id,
-              address: BRIDGE_CONFIG.contracts.baseRouter,
+              address: baseRouter,
               abi: ROUTER_ABI,
               functionName: "lzReceiveGas",
             })) as bigint;
@@ -213,9 +218,18 @@ export default function Home() {
         log(`Error (balance): ${e?.shortMessage ?? e?.message ?? "unknown"}`);
       }
     })();
-  }, [mounted, isConnected, address, unsupported, onLinea, onBase, chainId, wagmiConfig]);
+  }, [
+    mounted,
+    isConnected,
+    address,
+    unsupported,
+    onLinea,
+    onBase,
+    chainId,
+    wagmiConfig,
+    baseRouter,
+  ]);
 
-  // Keep status aligned
   useEffect(() => {
     if (!mounted) return;
 
@@ -244,14 +258,12 @@ export default function Home() {
     }
 
     if (bridgeState === "ERROR") {
-      // allow it to recover to READY when inputs are corrected
       setBridgeState("READY");
       setStatusMessage("READY — waiting for input.");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mounted, isConnected, unsupported, amountExceedsBalance, amountExceedsBaseCap]);
 
-  // Debounced fee quote when amount/recipient changes
   useEffect(() => {
     if (!mounted) return;
 
@@ -275,11 +287,9 @@ export default function Home() {
 
           const toBytes32 = addressToBytes32(effectiveRecipient);
 
-          // MUST supply valid Type-3 options (lzReceive gas) on BOTH paths
-          const gas =
-            onBase
-              ? (baseLzReceiveGas ?? BigInt(BRIDGE_CONFIG.lz.lzReceiveGasDefault))
-              : BigInt(BRIDGE_CONFIG.lz.lzReceiveGasDefault);
+          const gas = onBase
+            ? (baseLzReceiveGas ?? BigInt(BRIDGE_CONFIG.lz.lzReceiveGasDefault))
+            : BigInt(BRIDGE_CONFIG.lz.lzReceiveGasDefault);
 
           const options = buildLzReceiveOptions(gas, 0n);
 
@@ -377,16 +387,10 @@ export default function Home() {
   async function hasEnoughNativeForFee(nativeFee: bigint) {
     if (!address) return false;
 
-    // Conservative buffers to avoid "insufficient funds" mid-flow.
-    // Base has 2 tx (deposit + bridge), Linea may have approve + send.
-    const buffer = onBase ? parseUnits("0.00015", 18) : parseUnits("0.00008", 18);
+    const buffer = onBase ? parseUnits("0.00012", 18) : parseUnits("0.00008", 18);
 
     try {
-      const bal = await getBalance(wagmiConfig, {
-        chainId,
-        address,
-      });
-
+      const bal = await getBalance(wagmiConfig, { chainId, address });
       const needed = nativeFee + buffer;
 
       if (bal.value < needed) {
@@ -397,11 +401,9 @@ export default function Home() {
         );
         return false;
       }
-
       return true;
     } catch (e: any) {
       log(`Warning: could not read native balance (pre-check skipped). ${e?.message ?? ""}`);
-      // If we cannot read balance, do not block.
       return true;
     }
   }
@@ -450,16 +452,14 @@ export default function Home() {
         return;
       }
 
-      // Quote fee (authoritative)
       setBridgeState("QUOTING_FEE");
       setStatusMessage("QUOTING FEE…");
 
       const toBytes32 = addressToBytes32(effectiveRecipient);
 
-      const gas =
-        onBase
-          ? (baseLzReceiveGas ?? BigInt(BRIDGE_CONFIG.lz.lzReceiveGasDefault))
-          : BigInt(BRIDGE_CONFIG.lz.lzReceiveGasDefault);
+      const gas = onBase
+        ? (baseLzReceiveGas ?? BigInt(BRIDGE_CONFIG.lz.lzReceiveGasDefault))
+        : BigInt(BRIDGE_CONFIG.lz.lzReceiveGasDefault);
 
       const options = buildLzReceiveOptions(gas, 0n);
 
@@ -489,7 +489,6 @@ export default function Home() {
         setFeeWei(nativeFee);
         log(`Native fee: ${formatEther(nativeFee)} ETH`);
 
-        // NEW: native balance pre-check
         const okNative = await hasEnoughNativeForFee(nativeFee);
         if (!okNative) {
           setBridgeState("ERROR");
@@ -497,7 +496,6 @@ export default function Home() {
           return;
         }
 
-        // Approve DTC_LINEA to adapter if needed
         const allowance = (await readContract(wagmiConfig, {
           chainId: linea.id,
           address: BRIDGE_CONFIG.contracts.dtcLinea,
@@ -567,12 +565,10 @@ export default function Home() {
         setStatusMessage("CONFIRMED — transaction mined.");
         log("Confirmed.");
 
-        // Refresh balance after send
         try {
-          const tokenAddress = BRIDGE_CONFIG.contracts.dtcLinea as `0x${string}`;
           const bal = (await readContract(wagmiConfig, {
             chainId: linea.id,
-            address: tokenAddress,
+            address: BRIDGE_CONFIG.contracts.dtcLinea,
             abi: ERC20_ABI,
             functionName: "balanceOf",
             args: [address],
@@ -583,7 +579,7 @@ export default function Home() {
         return;
       }
 
-      // BASE -> LINEA (ENFORCED USER DEPOSIT STEP)
+      // BASE -> LINEA (simulate -> write, infinite approve)
       if (onBase) {
         log(`Send: Base → Linea amount=${amount} recipient=${effectiveRecipient}`);
 
@@ -609,7 +605,6 @@ export default function Home() {
         setFeeWei(nativeFee);
         log(`Native fee: ${formatEther(nativeFee)} ETH`);
 
-        // NEW: native balance pre-check (Base has 2 tx)
         const okNative = await hasEnoughNativeForFee(nativeFee);
         if (!okNative) {
           setBridgeState("ERROR");
@@ -617,35 +612,50 @@ export default function Home() {
           return;
         }
 
-        // STEP 1: Transfer user's Base DTC (OFT token) into the router first
-        setBridgeState("DEPOSITING");
-        setStatusMessage("DEPOSITING — transferring DTC to router…");
-        log("Depositing: transferring user DTC to router first (required).");
-
-        const depositHash = await writeContract(wagmiConfig, {
+        const allowance = (await readContract(wagmiConfig, {
           chainId: base.id,
           address: BRIDGE_CONFIG.contracts.baseOft,
           abi: ERC20_ABI,
-          functionName: "transfer",
-          args: [BRIDGE_CONFIG.contracts.baseRouter, parsedAmountLD],
-        });
+          functionName: "allowance",
+          args: [address, baseRouter],
+        })) as bigint;
 
-        log(`Deposit tx sent: ${depositHash}`);
-        await waitForTransactionReceipt(wagmiConfig, { chainId: base.id, hash: depositHash });
-        log("Deposit confirmed.");
+        if (allowance < parsedAmountLD) {
+          setBridgeState("NEED_APPROVAL");
+          setStatusMessage("NEED APPROVAL — approving DTC…");
+          log("Allowance low. Approving router (infinite approval) …");
 
-        // STEP 2: Call router bridgeToLinea
+          setBridgeState("APPROVING");
+          setStatusMessage("APPROVING…");
+
+          const approveSim = await simulateContract(wagmiConfig, {
+            chainId: base.id,
+            address: BRIDGE_CONFIG.contracts.baseOft,
+            abi: ERC20_ABI,
+            functionName: "approve",
+            args: [baseRouter, maxUint256],
+          });
+
+          const approveHash = await writeContract(wagmiConfig, approveSim.request);
+
+          log(`Approve tx sent: ${approveHash}`);
+          await waitForTransactionReceipt(wagmiConfig, { chainId: base.id, hash: approveHash });
+          log("Approve confirmed.");
+        }
+
         setBridgeState("SENDING");
         setStatusMessage("SENDING…");
 
-        const sendHash = await writeContract(wagmiConfig, {
+        const bridgeSim = await simulateContract(wagmiConfig, {
           chainId: base.id,
-          address: BRIDGE_CONFIG.contracts.baseRouter,
+          address: baseRouter,
           abi: ROUTER_ABI,
           functionName: "bridgeToLinea",
           args: [effectiveRecipient, parsedAmountLD],
           value: nativeFee,
         });
+
+        const sendHash = await writeContract(wagmiConfig, bridgeSim.request);
 
         log(`Bridge tx sent: ${sendHash}`);
 
@@ -675,12 +685,10 @@ export default function Home() {
         setStatusMessage("CONFIRMED — transaction mined.");
         log("Confirmed.");
 
-        // Refresh Base balance after deposit+send
         try {
-          const tokenAddress = BRIDGE_CONFIG.contracts.baseOft as `0x${string}`;
           const bal = (await readContract(wagmiConfig, {
             chainId: base.id,
-            address: tokenAddress,
+            address: BRIDGE_CONFIG.contracts.baseOft,
             abi: ERC20_ABI,
             functionName: "balanceOf",
             args: [address],
@@ -710,7 +718,6 @@ export default function Home() {
     }
   }
 
-  // Hydration-safe render gate at the end (hooks already executed)
   if (!mounted) return null;
 
   const explorerBase =
@@ -720,7 +727,9 @@ export default function Home() {
       ? BRIDGE_CONFIG.chains.base.explorerBaseUrl
       : "";
 
-  const balanceLabel = isConnected ? `${formatToken(userBal, tokenDecimals, 6)} DTC` : "—";
+  const balanceLabel = isConnected
+    ? `${formatToken(userBal, tokenDecimals, 6)} DTC`
+    : "—";
 
   const sendDisabled =
     unsupported ||
@@ -733,7 +742,6 @@ export default function Home() {
     bridgeState === "QUOTING_FEE" ||
     bridgeState === "NEED_APPROVAL" ||
     bridgeState === "APPROVING" ||
-    bridgeState === "DEPOSITING" ||
     bridgeState === "SENDING";
 
   return (
@@ -746,18 +754,22 @@ export default function Home() {
           <div className="flex items-start justify-between">
             <div>
               <div className="text-sm text-black/60 dark:text-white/70">Bridge</div>
-              <h1 className="mt-1 text-2xl font-semibold tracking-tight">{directionLabel}</h1>
-              <p className="mt-1 text-sm text-black/60 dark:text-white/60">{directionHint}</p>
+              <h1 className="mt-1 text-2xl font-semibold tracking-tight">
+                {directionLabel}
+              </h1>
+              <p className="mt-1 text-sm text-black/60 dark:text-white/60">
+                {directionHint}
+              </p>
             </div>
           </div>
 
           <div className="mt-6 grid gap-4">
-            {/* Direction display (no toggle; derived from chain) */}
             <div className="rounded-2xl border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/5">
-              <div className="text-xs text-black/60 dark:text-white/60">Direction (auto)</div>
+              <div className="text-xs text-black/60 dark:text-white/60">
+                Direction (auto)
+              </div>
 
               <div className="mt-2 flex items-center gap-1 rounded-2xl border border-black/10 bg-white/60 p-1 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5">
-                {/* Linea -> Base */}
                 <button
                   disabled
                   className={[
@@ -772,7 +784,6 @@ export default function Home() {
                   <span>Linea → Base</span>
                 </button>
 
-                {/* Base -> Linea */}
                 <button
                   disabled
                   className={[
@@ -814,10 +825,11 @@ export default function Home() {
                 </button>
               </div>
 
-              {/* Minimal addition: balance line (inside same card, no layout move) */}
               <div className="mt-2 text-xs text-black/60 dark:text-white/60">
                 Balance:{" "}
-                <span className="font-semibold text-black/70 dark:text-white/70">{balanceLabel}</span>
+                <span className="font-semibold text-black/70 dark:text-white/70">
+                  {balanceLabel}
+                </span>
                 {onBase && baseCapPerTx != null ? (
                   <>
                     {" "}
@@ -910,8 +922,8 @@ export default function Home() {
 
                   {onBase ? (
                     <div className="mt-2 text-xs text-black/60 dark:text-white/60">
-                      Base → Linea requires a deposit step: the UI first transfers your Base DTC into the router,
-                      then calls <b>bridgeToLinea</b>.
+                      Base → Linea is one bridge transaction (approval required once per wallet). The UI calls{" "}
+                      <b>bridgeToLinea</b>.
                     </div>
                   ) : null}
                 </>
@@ -1047,7 +1059,9 @@ export default function Home() {
                   />
                   <div>
                     <div className="text-sm font-medium">LayerZero</div>
-                    <div className="text-xs text-black/60 dark:text-white/60">layerzero.network</div>
+                    <div className="text-xs text-black/60 dark:text-white/60">
+                      layerzero.network
+                    </div>
                   </div>
                 </a>
               </div>
