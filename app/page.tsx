@@ -76,7 +76,7 @@ export default function Home() {
 
   const [bridgeState, setBridgeState] = useState<BridgeState>("CONNECT_WALLET");
   const [statusMessage, setStatusMessage] = useState<string>(
-    "Waiting for wallet connection."
+    "READY — waiting for input."
   );
 
   const [amount, setAmount] = useState<string>("");
@@ -160,7 +160,7 @@ export default function Home() {
       );
     } catch {
       setBridgeState("ERROR");
-      setStatusMessage("ERROR — network switch rejected.");
+      setStatusMessage("⚠️ ERROR — network switch rejected.");
       log("Network switch rejected.");
     }
   }
@@ -228,10 +228,10 @@ export default function Home() {
         }
 
         setBridgeState("READY");
-        setStatusMessage("READY — waiting for input.");
+        setStatusMessage("✔️ READY — waiting for input.");
       } catch (e: any) {
         setBridgeState("ERROR");
-        setStatusMessage("ERROR — failed to fetch balance.");
+        setStatusMessage("⚠️ ERROR — failed to fetch balance.");
         log(`Error (balance): ${e?.shortMessage ?? e?.message ?? "unknown"}`);
       }
     })();
@@ -248,25 +248,25 @@ export default function Home() {
 
     if (unsupported) {
       setBridgeState("WRONG_NETWORK");
-      setStatusMessage("WRONG NETWORK — switch required.");
+      setStatusMessage("❌ WRONG NETWORK — switch required.");
       return;
     }
 
     if (amountExceedsBalance) {
       setBridgeState("ERROR");
-      setStatusMessage("ERROR — amount exceeds your DTC balance.");
+      setStatusMessage("⚠️ ERROR — amount exceeds your DTC balance.");
       return;
     }
 
     if (amountExceedsBaseCap) {
       setBridgeState("ERROR");
-      setStatusMessage("ERROR — amount exceeds Base cap per tx.");
+      setStatusMessage("⚠️ ERROR — amount exceeds Base cap per tx.");
       return;
     }
 
     if (bridgeState === "ERROR") {
       setBridgeState("READY");
-      setStatusMessage("READY — waiting for input.");
+      setStatusMessage("✔️ READY — waiting for input.");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mounted, isConnected, unsupported, amountExceedsBalance, amountExceedsBaseCap]);
@@ -347,11 +347,11 @@ export default function Home() {
           }
 
           setBridgeState("READY");
-          setStatusMessage("READY — waiting for input.");
+          setStatusMessage("✔️ READY — waiting for input.");
         } catch (e: any) {
           setFeeWei(undefined);
           setBridgeState("READY");
-          setStatusMessage("READY — waiting for input.");
+          setStatusMessage("✔️ READY — waiting for input.");
           log(`Error (quote): ${e?.shortMessage ?? e?.message ?? "unknown"}`);
         }
       })();
@@ -424,35 +424,35 @@ export default function Home() {
 
       if (unsupported) {
         setBridgeState("WRONG_NETWORK");
-        setStatusMessage("WRONG NETWORK — switch required.");
+        setStatusMessage("❌ WRONG NETWORK — switch required.");
         log("Send blocked: unsupported network.");
         return;
       }
 
       if (!parsedAmountLD) {
         setBridgeState("ERROR");
-        setStatusMessage("ERROR — enter a valid amount > 0.");
+        setStatusMessage("⚠️ ERROR — enter a valid amount > 0.");
         log("Send blocked: invalid amount.");
         return;
       }
 
       if (amountExceedsBalance) {
         setBridgeState("ERROR");
-        setStatusMessage("ERROR — amount exceeds your DTC balance.");
+        setStatusMessage("⚠️ ERROR — amount exceeds your DTC balance.");
         log("Send blocked: exceeds balance.");
         return;
       }
 
       if (amountExceedsBaseCap) {
         setBridgeState("ERROR");
-        setStatusMessage("ERROR — amount exceeds Base cap per tx.");
+        setStatusMessage("⚠️ ERROR — amount exceeds Base cap per tx.");
         log("Send blocked: exceeds Base cap.");
         return;
       }
 
       if (!effectiveRecipient) {
         setBridgeState("ERROR");
-        setStatusMessage("ERROR — enter a valid recipient address.");
+        setStatusMessage("⚠️ ERROR — enter a valid recipient address.");
         log("Send blocked: invalid recipient.");
         return;
       }
@@ -497,7 +497,7 @@ export default function Home() {
         const okNative = await hasEnoughNativeForFee(nativeFee);
         if (!okNative) {
           setBridgeState("ERROR");
-          setStatusMessage("ERROR — insufficient native ETH for fee + gas.");
+          setStatusMessage("⚠️ ERROR — insufficient native ETH for fee + gas.");
           return;
         }
 
@@ -533,7 +533,7 @@ export default function Home() {
         }
 
         setBridgeState("SENDING");
-        setStatusMessage("SENDING…");
+        setStatusMessage("SENDING… 🚀");
 
         const sendSim = await simulateContract(wagmiConfig, {
           chainId: linea.id,
@@ -571,7 +571,7 @@ export default function Home() {
         saveHistory(confirmed);
 
         setBridgeState("CONFIRMED");
-        setStatusMessage("CONFIRMED — transaction mined.");
+        setStatusMessage("✔️ CONFIRMED — transaction mined.");
         log("Confirmed.");
 
         try {
@@ -617,7 +617,7 @@ export default function Home() {
         const okNative = await hasEnoughNativeForFee(nativeFee);
         if (!okNative) {
           setBridgeState("ERROR");
-          setStatusMessage("ERROR — insufficient native ETH for fee + gas.");
+          setStatusMessage("⚠️ ERROR — insufficient native ETH for fee + gas.");
           return;
         }
 
@@ -653,7 +653,7 @@ export default function Home() {
         }
 
         setBridgeState("SENDING");
-        setStatusMessage("SENDING…");
+        setStatusMessage("SENDING… 🚀");
 
         const bridgeSim = await simulateContract(wagmiConfig, {
           chainId: base.id,
@@ -691,7 +691,7 @@ export default function Home() {
         saveHistory(confirmed);
 
         setBridgeState("CONFIRMED");
-        setStatusMessage("CONFIRMED — transaction mined.");
+        setStatusMessage("✔️ CONFIRMED — transaction mined.");
         log("Confirmed.");
 
         try {
@@ -709,7 +709,7 @@ export default function Home() {
       }
     } catch (e: any) {
       setBridgeState("ERROR");
-      setStatusMessage("ERROR — transaction failed.");
+      setStatusMessage("⚠️ ERROR — transaction failed.");
       log(`Error (send): ${e?.shortMessage ?? e?.message ?? "unknown"}`);
 
       const item: BridgeHistoryItem = {
@@ -885,7 +885,7 @@ export default function Home() {
               {unsupported ? (
                 <>
                   <div className="font-semibold text-red-600 dark:text-red-300">
-                    WRONG NETWORK — switch required
+                    ❌ WRONG NETWORK — switch required
                   </div>
                   <div className="mt-2 text-xs text-black/60 dark:text-black/60">
                     This app only supports Linea and Base. Use the buttons below.
@@ -911,7 +911,7 @@ export default function Home() {
               ) : (
                 <>
                   <div className="font-medium text-black dark:text-black">
-                    {bridgeState} — {statusMessage}
+                    {statusMessage}
                   </div>
 
                   {onBase ? (
