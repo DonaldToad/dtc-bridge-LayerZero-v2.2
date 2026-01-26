@@ -15,12 +15,7 @@ import {
   simulateContract,
 } from "@wagmi/core";
 
-import {
-  formatEther,
-  isAddress,
-  parseUnits,
-  maxUint256,
-} from "viem";
+import { formatEther, isAddress, parseUnits, maxUint256 } from "viem";
 
 import { BRIDGE_CONFIG } from "@/lib/bridgeConfig";
 import { ERC20_ABI, OFT_ABI, ROUTER_ABI } from "@/lib/abi";
@@ -148,6 +143,28 @@ export default function Home() {
     return max;
   }, [userBal, onBase, baseCapPerTx]);
 
+  // Direction buttons behave exactly like the network switch:
+  // they request a chain switch, and direction is derived from chainId.
+  async function requestDirection(next: "LINEA_TO_BASE" | "BASE_TO_LINEA") {
+    if (unsupported) return;
+
+    const targetChainId = next === "LINEA_TO_BASE" ? linea.id : base.id;
+    if (chainId === targetChainId) return;
+
+    try {
+      await switchChain({ chainId: targetChainId });
+      log(
+        `Network switch requested via direction: ${
+          next === "LINEA_TO_BASE" ? "Linea" : "Base"
+        }`
+      );
+    } catch {
+      setBridgeState("ERROR");
+      setStatusMessage("ERROR — network switch rejected.");
+      log("Network switch rejected.");
+    }
+  }
+
   useEffect(() => {
     if (!mounted) return;
 
@@ -227,6 +244,7 @@ export default function Home() {
     onBase,
     chainId,
     wagmiConfig,
+    baseRouter,
     baseRouter,
   ]);
 
@@ -315,7 +333,6 @@ export default function Home() {
             })) as { nativeFee: bigint; lzTokenFee: bigint };
 
             setFeeWei(fee.nativeFee);
-            log(`Native fee: ${formatEther(fee.nativeFee)} ETH`);
           } else if (onBase) {
             log(`Quote: Base → Linea amount=${amount} recipient=${effectiveRecipient}`);
 
@@ -338,15 +355,14 @@ export default function Home() {
             })) as { nativeFee: bigint; lzTokenFee: bigint };
 
             setFeeWei(fee.nativeFee);
-            log(`Native fee: ${formatEther(fee.nativeFee)} ETH`);
           }
 
           setBridgeState("READY");
-          setStatusMessage("READY — fee quoted.");
+          setStatusMessage("READY — waiting for input.");
         } catch (e: any) {
           setFeeWei(undefined);
-          setBridgeState("ERROR");
-          setStatusMessage("ERROR — fee quote failed.");
+          setBridgeState("READY");
+          setStatusMessage("READY — waiting for input.");
           log(`Error (quote): ${e?.shortMessage ?? e?.message ?? "unknown"}`);
         }
       })();
@@ -507,18 +523,20 @@ export default function Home() {
         if (allowance < parsedAmountLD) {
           setBridgeState("NEED_APPROVAL");
           setStatusMessage("NEED APPROVAL — approving DTC…");
-          log(`Allowance low. Approving ${amount} DTC…`);
+          log("Allowance low. Approving adapter…");
 
           setBridgeState("APPROVING");
           setStatusMessage("APPROVING…");
 
-          const approveHash = await writeContract(wagmiConfig, {
+          const approveSim = await simulateContract(wagmiConfig, {
             chainId: linea.id,
             address: BRIDGE_CONFIG.contracts.dtcLinea,
             abi: ERC20_ABI,
             functionName: "approve",
-            args: [BRIDGE_CONFIG.contracts.lineaAdapter, parsedAmountLD],
+            args: [BRIDGE_CONFIG.contracts.lineaAdapter, maxUint256],
           });
+
+          const approveHash = await writeContract(wagmiConfig, approveSim.request);
 
           log(`Approve tx sent: ${approveHash}`);
           await waitForTransactionReceipt(wagmiConfig, { chainId: linea.id, hash: approveHash });
@@ -528,7 +546,7 @@ export default function Home() {
         setBridgeState("SENDING");
         setStatusMessage("SENDING…");
 
-        const sendHash = await writeContract(wagmiConfig, {
+        const sendSim = await simulateContract(wagmiConfig, {
           chainId: linea.id,
           address: BRIDGE_CONFIG.contracts.lineaAdapter,
           abi: OFT_ABI,
@@ -537,14 +555,16 @@ export default function Home() {
           value: nativeFee,
         });
 
-        log(`Send tx sent: ${sendHash}`);
+        const sendHash = await writeContract(wagmiConfig, sendSim.request);
+
+        log(`Bridge tx sent: ${sendHash}`);
 
         const item: BridgeHistoryItem = {
           time: Date.now(),
           direction: "LINEA_TO_BASE",
           amount: amount.trim(),
           recipient: effectiveRecipient,
-          chainId: linea.id,
+          chainId: chainId ?? 0,
           txHash: sendHash,
           status: "PENDING",
         };
@@ -664,7 +684,7 @@ export default function Home() {
           direction: "BASE_TO_LINEA",
           amount: amount.trim(),
           recipient: effectiveRecipient,
-          chainId: base.id,
+          chainId: chainId ?? 0,
           txHash: sendHash,
           status: "PENDING",
         };
@@ -727,9 +747,7 @@ export default function Home() {
       ? BRIDGE_CONFIG.chains.base.explorerBaseUrl
       : "";
 
-  const balanceLabel = isConnected
-    ? `${formatToken(userBal, tokenDecimals, 6)} DTC`
-    : "—";
+  const balanceLabel = isConnected ? `${formatToken(userBal, tokenDecimals, 6)} DTC` : "—";
 
   const sendDisabled =
     unsupported ||
@@ -754,45 +772,38 @@ export default function Home() {
           <div className="flex items-start justify-between">
             <div>
               <div className="text-sm text-black/60 dark:text-white/70">Bridge</div>
-              <h1 className="mt-1 text-2xl font-semibold tracking-tight">
-                {directionLabel}
-              </h1>
-              <p className="mt-1 text-sm text-black/60 dark:text-white/60">
-                {directionHint}
-              </p>
+              <h1 className="mt-1 text-2xl font-semibold tracking-tight">{directionLabel}</h1>
+              <p className="mt-1 text-sm text-black/60 dark:text-black/60">{directionHint}</p>
             </div>
           </div>
 
           <div className="mt-6 grid gap-4">
-            <div className="rounded-2xl border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/5">
-              <div className="text-xs text-black/60 dark:text-white/60">
-                Direction (auto)
-              </div>
+            {/* Direction (auto) */}
+            <div className="rounded-2xl border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/50">
+              <div className="text-xs text-black/60 dark:text-black/60">Direction (auto)</div>
 
-              <div className="mt-2 flex items-center gap-1 rounded-2xl border border-black/10 bg-white/60 p-1 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5">
+              <div className="mt-2 flex items-center gap-1 rounded-2xl border border-black/10 bg-white/60 p-1 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/50">
                 <button
-                  disabled
+                  onClick={() => requestDirection("LINEA_TO_BASE")}
                   className={[
                     "flex w-full items-center justify-center gap-2 rounded-2xl px-3 py-2 text-sm font-semibold transition",
                     onLinea
                       ? "bg-black text-white dark:bg-white dark:text-black"
-                      : "bg-white/50 text-black/35 dark:bg-white/5 dark:text-white/30",
+                      : "bg-white/50 text-black/35 dark:bg-white/50 dark:text-black/35",
                   ].join(" ")}
-                  title="Direction is determined by your current network"
                 >
                   <Image src="/brands/linea/icon.png" alt="Linea" width={18} height={18} />
                   <span>Linea → Base</span>
                 </button>
 
                 <button
-                  disabled
+                  onClick={() => requestDirection("BASE_TO_LINEA")}
                   className={[
                     "flex w-full items-center justify-center gap-2 rounded-2xl px-3 py-2 text-sm font-semibold transition",
                     onBase
                       ? "bg-black text-white dark:bg-white dark:text-black"
-                      : "bg-white/50 text-black/35 dark:bg-white/5 dark:text-white/30",
+                      : "bg-white/50 text-black/35 dark:bg-white/50 dark:text-black/35",
                   ].join(" ")}
-                  title="Direction is determined by your current network"
                 >
                   <Image src="/brands/base/icon.jpeg" alt="Base" width={18} height={18} />
                   <span>Base → Linea</span>
@@ -806,18 +817,20 @@ export default function Home() {
               ) : null}
             </div>
 
-            <div className="rounded-2xl border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/5">
-              <div className="text-xs text-black/60 dark:text-white/60">Amount</div>
-              <div className="mt-2 flex gap-2">
+            {/* Amount */}
+            <div className="rounded-2xl border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/50">
+              <div className="text-xs text-black/60 dark:text-black/60">Amount</div>
+
+              <div className="mt-2 flex items-center gap-2">
                 <input
-                  className="w-full rounded-2xl border border-black/10 bg-white/70 px-3 py-2 text-sm outline-none placeholder:text-black/40 focus:ring-2 focus:ring-cyan-400/40 dark:border-white/10 dark:bg-white/5 dark:text-white dark:placeholder:text-white/40"
+                  className="w-full rounded-2xl border border-black/10 bg-white/70 px-3 py-2 text-sm text-black outline-none placeholder:text-black/40 focus:ring-2 focus:ring-cyan-400/40 dark:border-white/10 dark:bg-white/50 dark:text-black dark:placeholder:text-black/40"
                   placeholder="0.0"
                   disabled={unsupported}
                   value={amount}
                   onChange={(e) => setAmount(e.target.value)}
                 />
                 <button
-                  className="rounded-2xl border border-black/10 bg-white/70 px-4 py-2 text-sm font-medium hover:bg-white disabled:opacity-50 dark:border-white/10 dark:bg-white/10 dark:text-white dark:hover:bg-white/20"
+                  className="rounded-2xl border border-black/10 bg-white/70 px-4 py-2 text-sm font-medium text-black hover:bg-white disabled:opacity-50 dark:border-white/10 dark:bg-white/50 dark:text-black dark:hover:bg-white"
                   disabled={unsupported || !isConnected}
                   onClick={handleMax}
                 >
@@ -825,39 +838,29 @@ export default function Home() {
                 </button>
               </div>
 
-              <div className="mt-2 text-xs text-black/60 dark:text-white/60">
+              <div className="mt-2 text-xs text-black/60 dark:text-black/60">
                 Balance:{" "}
-                <span className="font-semibold text-black/70 dark:text-white/70">
+                <span className="font-semibold text-black/70 dark:text-black/70">
                   {balanceLabel}
                 </span>
                 {onBase && baseCapPerTx != null ? (
                   <>
                     {" "}
                     • Cap/tx:{" "}
-                    <span className="font-semibold text-black/70 dark:text-white/70">
+                    <span className="font-semibold text-black/70 dark:text-black/70">
                       {formatToken(baseCapPerTx, tokenDecimals, 6)} DTC
                     </span>
                   </>
                 ) : null}
               </div>
-
-              {amountExceedsBalance ? (
-                <div className="mt-2 text-xs font-semibold text-red-600 dark:text-red-300">
-                  Amount exceeds your balance.
-                </div>
-              ) : null}
-
-              {amountExceedsBaseCap ? (
-                <div className="mt-2 text-xs font-semibold text-red-600 dark:text-red-300">
-                  Amount exceeds Base cap per tx.
-                </div>
-              ) : null}
             </div>
 
-            <div className="rounded-2xl border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/5">
-              <div className="text-xs text-black/60 dark:text-white/60">Recipient</div>
+            {/* Recipient */}
+            <div className="rounded-2xl border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/50">
+              <div className="text-xs text-black/60 dark:text-black/60">Recipient</div>
+
               <input
-                className="mt-2 w-full rounded-2xl border border-black/10 bg-white/70 px-3 py-2 text-sm outline-none placeholder:text-black/40 focus:ring-2 focus:ring-cyan-400/40 dark:border-white/10 dark:bg-white/5 dark:text-white dark:placeholder:text-white/40"
+                className="mt-2 w-full rounded-2xl border border-black/10 bg-white/70 px-3 py-2 text-sm text-black outline-none placeholder:text-black/40 focus:ring-2 focus:ring-cyan-400/40 dark:border-white/10 dark:bg-white/50 dark:text-black dark:placeholder:text-black/40"
                 placeholder="0x… (default = your wallet)"
                 disabled={unsupported}
                 value={recipient}
@@ -865,17 +868,19 @@ export default function Home() {
               />
             </div>
 
-            <div className="rounded-2xl border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/5">
-              <div className="text-xs text-black/60 dark:text-white/60">Estimated fee</div>
-              <div className="mt-1 text-sm text-black/80 dark:text-white/80">
+            {/* Estimated fee */}
+            <div className="rounded-2xl border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/50">
+              <div className="text-xs text-black/60 dark:text-black/60">Estimated fee</div>
+              <div className="mt-2 text-sm text-black dark:text-black">
                 {feeWei != null ? `${formatEther(feeWei)} ETH` : "—"}
               </div>
             </div>
 
+            {/* Send */}
             <button
-              className="rounded-3xl bg-black px-5 py-3 text-base font-semibold text-white shadow-sm hover:opacity-90 disabled:opacity-50 dark:bg-white dark:text-black"
-              disabled={sendDisabled}
               onClick={handleSend}
+              disabled={sendDisabled}
+              className="mt-1 w-full rounded-2xl bg-black px-5 py-3 text-sm font-semibold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-white dark:text-black"
             >
               SEND IT! 🚀
             </button>
@@ -887,13 +892,13 @@ export default function Home() {
           <div className="rounded-3xl border border-black/10 bg-white/60 p-6 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5">
             <div className="text-sm font-semibold">Bridge Status</div>
 
-            <div className="mt-3 rounded-2xl border border-black/10 bg-white/50 p-4 text-sm dark:border-white/10 dark:bg-white/5">
+            <div className="mt-3 rounded-2xl border border-black/10 bg-white/50 p-4 text-sm dark:border-white/10 dark:bg-white/50">
               {unsupported ? (
                 <>
                   <div className="font-semibold text-red-600 dark:text-red-300">
                     WRONG NETWORK — switch required
                   </div>
-                  <div className="mt-2 text-xs text-black/60 dark:text-white/60">
+                  <div className="mt-2 text-xs text-black/60 dark:text-black/60">
                     This app only supports Linea and Base. Use the buttons below.
                   </div>
 
@@ -907,7 +912,7 @@ export default function Home() {
                     </button>
                     <button
                       onClick={() => switchChain({ chainId: base.id })}
-                      className="flex items-center gap-2 rounded-2xl border border-black/10 bg-white/70 px-3 py-2 text-sm font-semibold text-black hover:bg-white dark:border-white/10 dark:bg-white/10 dark:text-white dark:hover:bg-white/20"
+                      className="flex items-center gap-2 rounded-2xl border border-black/10 bg-white/70 px-3 py-2 text-sm font-semibold text-black hover:bg-white dark:border-white/10 dark:bg-white/50 dark:text-black dark:hover:bg-white"
                     >
                       <Image src="/brands/base/icon.jpeg" alt="Base" width={18} height={18} />
                       Switch to Base
@@ -916,12 +921,12 @@ export default function Home() {
                 </>
               ) : (
                 <>
-                  <div className="font-medium">
+                  <div className="font-medium text-black dark:text-black">
                     {bridgeState} — {statusMessage}
                   </div>
 
                   {onBase ? (
-                    <div className="mt-2 text-xs text-black/60 dark:text-white/60">
+                    <div className="mt-2 text-xs text-black/60 dark:text-black/60">
                       Base → Linea is one bridge transaction (approval required once per wallet). The UI calls{" "}
                       <b>bridgeToLinea</b>.
                     </div>
@@ -931,9 +936,11 @@ export default function Home() {
             </div>
           </div>
 
+          {/* Console Log — FIXED: force black text in dark mode too */}
           <div className="rounded-3xl border border-black/10 bg-white/60 p-6 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5">
             <div className="text-sm font-semibold">Console Log</div>
-            <div className="mt-3 h-64 overflow-auto rounded-2xl border border-black/10 bg-white/50 p-4 text-xs leading-relaxed dark:border-white/10 dark:bg-white/5 dark:text-white">
+
+            <div className="mt-3 h-64 overflow-auto rounded-2xl border border-black/10 bg-white/50 p-4 text-xs leading-relaxed !text-black dark:border-white/10 dark:bg-white/50 dark:!text-black">
               {logs.length === 0 ? (
                 <>
                   • App loaded
@@ -942,7 +949,7 @@ export default function Home() {
                 </>
               ) : (
                 logs.map((x, i) => (
-                  <div key={i}>
+                  <div key={i} className="!text-black dark:!text-black">
                     • {new Date(x.t).toLocaleTimeString()} — {x.m}
                   </div>
                 ))
@@ -952,7 +959,7 @@ export default function Home() {
 
           <div className="rounded-3xl border border-black/10 bg-white/60 p-6 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5">
             <div className="text-sm font-semibold">History</div>
-            <div className="mt-3 rounded-2xl border border-black/10 bg-white/50 p-4 text-sm text-black/60 dark:border-white/10 dark:bg-white/5 dark:text-white/60">
+            <div className="mt-3 rounded-2xl border border-black/10 bg-white/50 p-4 text-sm text-black/60 dark:border-white/10 dark:bg-white/50 dark:text-black/60">
               {history.length === 0 ? (
                 <>No local history yet (we’ll store it in your browser).</>
               ) : (
@@ -961,17 +968,17 @@ export default function Home() {
                     return (
                       <div
                         key={idx}
-                        className="flex items-start justify-between gap-3 rounded-2xl border border-black/10 bg-white/60 p-3 text-sm text-black/70 dark:border-white/10 dark:bg-white/5 dark:text-white/70"
+                        className="flex items-start justify-between gap-3 rounded-2xl border border-black/10 bg-white/60 p-3 text-sm text-black/70 dark:border-white/10 dark:bg-white/60 dark:text-black/70"
                       >
                         <div className="min-w-0">
                           <div className="font-semibold">
                             {h.direction === "LINEA_TO_BASE" ? "Linea → Base" : "Base → Linea"} •{" "}
                             {h.amount} DTC
                           </div>
-                          <div className="mt-1 text-xs text-black/60 dark:text-white/60">
+                          <div className="mt-1 text-xs text-black/60 dark:text-black/60">
                             To: {h.recipient}
                           </div>
-                          <div className="mt-1 text-xs text-black/50 dark:text-white/50">
+                          <div className="mt-1 text-xs text-black/50 dark:text-black/50">
                             {new Date(h.time).toLocaleString()} • {h.status}
                           </div>
                         </div>
@@ -982,7 +989,7 @@ export default function Home() {
                               href={`${explorerBase}/tx/${h.txHash}`}
                               target="_blank"
                               rel="noreferrer"
-                              className="rounded-2xl border border-black/10 bg-white/70 px-3 py-2 text-xs font-semibold text-black hover:bg-white dark:border-white/10 dark:bg-white/10 dark:text-white dark:hover:bg-white/20"
+                              className="rounded-2xl border border-black/10 bg-white/70 px-3 py-2 text-xs font-semibold text-black hover:bg-white dark:border-white/10 dark:bg-white/50 dark:text-black dark:hover:bg-white"
                             >
                               View
                             </a>
@@ -1001,7 +1008,7 @@ export default function Home() {
         <aside className="hidden lg:block">
           <div className="sticky top-6 grid gap-4">
             <div className="rounded-3xl border border-black/10 bg-white/60 p-5 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5">
-              <div className="text-xs font-semibold tracking-wide text-black/60 dark:text-white/60">
+              <div className="text-xs font-semibold tracking-wide text-black/60 dark:text-black/60">
                 Ecosystem
               </div>
 
@@ -1010,12 +1017,14 @@ export default function Home() {
                   href="https://donaldtoad.com/"
                   target="_blank"
                   rel="noreferrer"
-                  className="flex items-center gap-3 rounded-2xl border border-black/10 bg-white/50 p-3 hover:bg-white/80 dark:border-white/10 dark:bg-white/10 dark:hover:bg-white/20"
+                  className="flex items-center gap-3 rounded-2xl border border-black/10 bg-white/50 p-3 hover:bg-white/80 dark:border-white/10 dark:bg-white/60 dark:hover:bg-white/80"
                 >
                   <Image src="/brands/dtc/dtc.png" alt="DTC" width={28} height={28} />
                   <div>
-                    <div className="text-sm font-medium">Donald Toad Coin</div>
-                    <div className="text-xs text-black/60 dark:text-white/60">donaldtoad.com</div>
+                    <div className="text-sm font-medium text-black dark:text-black">
+                      Donald Toad Coin
+                    </div>
+                    <div className="text-xs text-black/60 dark:text-black/60">donaldtoad.com</div>
                   </div>
                 </a>
 
@@ -1023,12 +1032,12 @@ export default function Home() {
                   href="https://linea.build"
                   target="_blank"
                   rel="noreferrer"
-                  className="flex items-center gap-3 rounded-2xl border border-black/10 bg-white/50 p-3 hover:bg-white/80 dark:border-white/10 dark:bg-white/10 dark:hover:bg-white/20"
+                  className="flex items-center gap-3 rounded-2xl border border-black/10 bg-white/50 p-3 hover:bg-white/80 dark:border-white/10 dark:bg-white/60 dark:hover:bg-white/80"
                 >
                   <Image src="/brands/linea/icon.png" alt="Linea" width={28} height={28} />
                   <div>
-                    <div className="text-sm font-medium">Linea</div>
-                    <div className="text-xs text-black/60 dark:text-white/60">linea.build</div>
+                    <div className="text-sm font-medium text-black dark:text-black">Linea</div>
+                    <div className="text-xs text-black/60 dark:text-black/60">linea.build</div>
                   </div>
                 </a>
 
@@ -1036,12 +1045,12 @@ export default function Home() {
                   href="https://base.org"
                   target="_blank"
                   rel="noreferrer"
-                  className="flex items-center gap-3 rounded-2xl border border-black/10 bg-white/50 p-3 hover:bg-white/80 dark:border-white/10 dark:bg-white/10 dark:hover:bg-white/20"
+                  className="flex items-center gap-3 rounded-2xl border border-black/10 bg-white/50 p-3 hover:bg-white/80 dark:border-white/10 dark:bg-white/60 dark:hover:bg-white/80"
                 >
                   <Image src="/brands/base/icon.jpeg" alt="Base" width={28} height={28} />
                   <div>
-                    <div className="text-sm font-medium">Base</div>
-                    <div className="text-xs text-black/60 dark:text-white/60">base.org</div>
+                    <div className="text-sm font-medium text-black dark:text-black">Base</div>
+                    <div className="text-xs text-black/60 dark:text-black/60">base.org</div>
                   </div>
                 </a>
 
@@ -1049,7 +1058,7 @@ export default function Home() {
                   href="https://layerzero.network"
                   target="_blank"
                   rel="noreferrer"
-                  className="flex items-center gap-3 rounded-2xl border border-black/10 bg-white/50 p-3 hover:bg-white/80 dark:border-white/10 dark:bg-white/10 dark:hover:bg-white/20"
+                  className="flex items-center gap-3 rounded-2xl border border-black/10 bg-white/50 p-3 hover:bg-white/80 dark:border-white/10 dark:bg-white/60 dark:hover:bg-white/80"
                 >
                   <Image
                     src="/brands/layerzero/LayerZero_emblem.svg"
@@ -1058,15 +1067,13 @@ export default function Home() {
                     height={20}
                   />
                   <div>
-                    <div className="text-sm font-medium">LayerZero</div>
-                    <div className="text-xs text-black/60 dark:text-white/60">
-                      layerzero.network
-                    </div>
+                    <div className="text-sm font-medium text-black dark:text-black">LayerZero</div>
+                    <div className="text-xs text-black/60 dark:text-black/60">layerzero.network</div>
                   </div>
                 </a>
               </div>
 
-              <div className="mt-4 text-xs text-black/50 dark:text-white/40">
+              <div className="mt-4 text-xs text-black/50 dark:text-black/50">
                 Tip: the bridge direction is automatic. Switch network to change direction.
               </div>
             </div>

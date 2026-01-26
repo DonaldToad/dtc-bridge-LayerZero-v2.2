@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+.env.local
+.env
+
 
 # vercel
 .vercel
@@ -45,3 +48,7 @@ node_modules/
 .env*
 .DS_Store
 *.bak
+
+.env.local
+.env
+
