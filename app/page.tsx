@@ -235,18 +235,7 @@ export default function Home() {
         log(`Error (balance): ${e?.shortMessage ?? e?.message ?? "unknown"}`);
       }
     })();
-  }, [
-    mounted,
-    isConnected,
-    address,
-    unsupported,
-    onLinea,
-    onBase,
-    chainId,
-    wagmiConfig,
-    baseRouter,
-    baseRouter,
-  ]);
+  }, [mounted, isConnected, address, unsupported, onLinea, onBase, chainId, wagmiConfig, baseRouter]);
 
   useEffect(() => {
     if (!mounted) return;
@@ -599,7 +588,7 @@ export default function Home() {
         return;
       }
 
-      // BASE -> LINEA (simulate -> write, infinite approve)
+      // BASE -> LINEA
       if (onBase) {
         log(`Send: Base → Linea amount=${amount} recipient=${effectiveRecipient}`);
 
@@ -936,7 +925,7 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Console Log — FIXED: force black text in dark mode too */}
+          {/* Console Log */}
           <div className="rounded-3xl border border-black/10 bg-white/60 p-6 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5">
             <div className="text-sm font-semibold">Console Log</div>
 
